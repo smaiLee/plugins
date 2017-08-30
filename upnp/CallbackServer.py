@@ -5,23 +5,26 @@ from lib.model.smartplugin import SmartPlugin
 in __init__.py
 --------------
 
-    def __init__(self, smarthome, ip='0.0.0.0', port=0):
-        if self.is_int(port):
-            self.port = int(port)
-        else:
-            self.port = 0
-            self.logger.error("Invalid value '{}' configured for attribute port in plugin.conf, using '{}' instead".format(port, self.port if self.port != None else "random")
-        if self.port == 0:
-            #TODO: define port automatically
-            pass
-        
-        self.callbackserver = CallbackServer(smarthome, ip, port)
+    def __init__(self, smarthome, subscribe_events=false, event_callback_ip='0.0.0.0', event_callback_port=0):
+        self._subscribe_events = self.to_bool(subscribe_events)
+        if self._subscribe_events:
+            if self.is_int(event_callback_port):
+                port = int(event_callback_port)
+            else:
+                port = 0
+                self.logger.error("Invalid value '{}' configured for attribute event_callback_port in plugin.conf, using '{}' instead".format(event_callback_port, port if port != None else "random")
+            
+            self.callbackserver = CallbackServer(smarthome, event_callback_ip, event_callback_port)
+            
 
     def run(self):
-        self.callbackserver.connect()
+        if self._subscribe_events:
+            self.callbackserver.connect()
+            self.actual_port = self.callbackserver.sock.getsockname()[1];
     
     def stop(self):
-        self.callbackserver.close()
+        if self._subscribe_events:
+            self.callbackserver.close()
 """
 
 class CallbackServer(lib.connection.Server):
