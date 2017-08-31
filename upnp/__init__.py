@@ -24,6 +24,8 @@
 #########################################################################
 
 import logging
+import socket
+from urllib.parse import urlparse
 import upnpclient
 import lib.connection
 from lib.model.smartplugin import SmartPlugin
@@ -62,7 +64,7 @@ class UPnP(SmartPlugin):
     def run(self):
         if self._subscribe_events:
             self.callbackserver.connect()
-            self.actual_port = self.callbackserver.socket.getsockname()[1];
+            #self.actual_port = self.callbackserver.socket.getsockname()[1];
         self.alive = True
 
     def stop(self):
@@ -97,7 +99,7 @@ class UPnP(SmartPlugin):
             if self._subscribe_events and self.has_iattr(item.conf, 'upnp_service') and self.has_iattr(item.conf, 'upnp_statevar'):
                 device = upnpclient.Device(self.get_iattr_value(item.conf, 'upnp_device'))
                 service = device[self.get_iattr_value(item.conf, 'upnp_service')]
-                self.callbackserver.add_subscription(service)
+                self.callbackserver.add_subscription((device,service))
             return self.update_item
 
     def parse_logic(self, logic):
@@ -169,9 +171,19 @@ class CallbackServer(lib.connection.Server):
         self._sh = smarthome
         
     def add_subscription(self, service):
-        if self.connected:
-            sid, timeout = service.subscribe(self._callback_url)
-            self.active_subscriptions[sid] = service
+        if self.connected:            
+            # find out apropriate hostname or ip address for upnp device
+            deviceLocation = tuple(urlparse(service[0].location).netloc.split(":"))
+            #sq = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sq = socket.create_connection(deviceLocation)
+            callback_host = sq.getsockname()[0]
+            sq.shutdown(socket.SHUT_RDWR)
+            sq.close()
+            current_callback_url = "http://{}:{}/event".format(callback_host, self.socket.getsockname()[1])
+            self.logger.debug("Adding event subscription for service '{}' with callback URL '{}'".format(service, current_callback_url))
+            
+            sid, timeout = service[1].subscribe(current_callback_url)
+            self.active_subscriptions[sid] = service[1]
             self.logger.info("Added event subscription with id '{}' for service '{}'".format(sid, service))
             #TODO: scheduler for renew subscription before timeout
         else:
@@ -179,11 +191,14 @@ class CallbackServer(lib.connection.Server):
             self.logger.debug("Pending event subscription for service '{}'".format(service))
     
     def connect(self):
-        self.logger.debug("Connecting Event CallbackServer")
-        super().connect()
-        self.logger.info("Event CallbackServer started on '{}'".format(self._callback_url))
-        for service in self.pending_subscriptions:
-            self.add_subscription(service)
+        try:
+            self.logger.debug("Binding CallbackServer")
+            super().connect()
+            self.logger.info("CallbackServer listening on '{}'".format(self._callback_url))
+            for service in self.pending_subscriptions:
+                self.add_subscription(service)
+        except Exception as e:
+            self.logger.error(e)
     
     def handle_connection(self):
         # Notify message sample:
@@ -241,10 +256,10 @@ CONTENT-LENGTH: bytes in body
             
             self.send(b"HTTP/1.1 200 OK\r\n\r\n", close=True)
             
-        @property
-        def _callback_url():
-            sockname = self.socket.getsockname()
-            return "http://{}:{}/event".format(sockname[0], sockname[1])
+    @property
+    def _callback_url(self):
+        sockname = self.socket.getsockname()
+        return "http://{}:{}/event".format(sockname[0], sockname[1])
 
 
 """
@@ -255,4 +270,3 @@ if __name__ == '__main__':
     # todo
     # change PluginClassName appropriately
     PluginClassName(None).run()
-    
