@@ -22,10 +22,14 @@
 
 import logging
 import socket
+import datetime
 from urllib.parse import urlparse
 import upnpclient
 import lib.connection
 from lib.model.smartplugin import SmartPlugin
+
+#TODO set to e.g. 3600
+EVENT_SUBSCRIPTION_TIMEOUT = 20
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +41,7 @@ class UPnP(SmartPlugin):
     ALLOW_MULTIINSTANCE = False
     PLUGIN_VERSION = "1.3.1"
     
-    argitems = {}
-    event_subscriptions = {}
+    statevaritems = {}
 
     def __init__(self, sh, subscribe_events=False, event_callback_ip='0.0.0.0', event_callback_port=0):
         """
@@ -88,13 +91,16 @@ class UPnP(SmartPlugin):
         if self.has_iattr(item.conf, 'upnp_device') and self.has_iattr(item.conf, 'upnp_service'):
             if self.has_iattr(item.conf, 'upnp_statevar'):
                 device = upnpclient.Device(self.get_iattr_value(item.conf, 'upnp_device'))
-                service = device[self.get_iattr_value(item.conf, 'upnp_service')]
+                service = device[self.get_iattr_value(item.conf, 'upnp_service')
                 statevar = service.statevars[self.get_iattr_value(item.conf, 'upnp_statevar')]
-
-                self.argitems[statevar] = item
+                
+                if statevar in self.statevaritems:
+                    self.statevaritems[statevar].add(item)
+                else
+                    self.statevaritems[statevar] = [ item ]
                 
                 if self._subscribe_events:
-                    self.callbackserver.add_subscription(service)
+                    self.callbackserver.pend_subscription(statevar)
                 
             return self.update_item
 
@@ -137,8 +143,8 @@ class UPnP(SmartPlugin):
                 arguments = eval(self.get_iattr_value(item.conf, 'upnp_arguments')) if self.has_iattr(item.conf, 'upnp_arguments') else {}
                 
                 for argname, statevar in action.argsdef_in.items():
-                    if statevar in self.argitems:
-                        arguments[argname] = self.argitems[statevar]()
+                    if statevar in self.statevaritems:
+                        arguments[argname] = self.statevaritems[statevar][0]()
                 #for argname, argval in arguments.items():
                 #    logger.info("arg: {} = {}".format(argname, argval))
                 
@@ -146,14 +152,15 @@ class UPnP(SmartPlugin):
                 logger.info("Calling {}({})".format(actionname, arguments))
                 resp = action(**arguments)
                 logger.debug("UPnP response: {}".format(resp))
-                for outargname, val in resp.items():
+                for outargname, value in resp.items():
                     statevar = action.argsdef_out[outargname]
                     new_source = "Action {}.{}.{}".format(server.friendly_name, service.name, iattr_action)
                     self.set_item_by_statevar(statevar, value, new_source)
 
     def set_item_by_statevar(self, statevar, value, source):
-        if statevar in self.argitems:
-            self.argitems[statevar](value, 'UPnP', source)
+        if statevar in self.statevaritems:
+            for item in self.statevaritems[statevar]:
+                item(value, 'UPnP', source)
 
 
 class CallbackServer(lib.connection.Server):
@@ -161,43 +168,67 @@ class CallbackServer(lib.connection.Server):
     HEADER_TERMINATOR = b"\r\n\r\n"
     
     active_subscriptions = {}
-    pending_subscriptions = set()
+    _pending_subscriptions = {}
     
     def __init__(self, smarthome, set_item_by_statevar_callback, ip, port):
         lib.connection.Server.__init__(self, ip, port)
         self._set_item_by_statevar_callback = set_item_by_statevar_callback
         self._sh = smarthome
         
-    def add_subscription(self, service):
-        if self.connected:            
-            # find out apropriate hostname or ip address for upnp device
-            deviceLocation = tuple(urlparse(service.device.location).netloc.split(":"))
-            #sq = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sq = socket.create_connection(deviceLocation)
-            callback_host = sq.getsockname()[0]
-            sq.shutdown(socket.SHUT_RDWR)
-            sq.close()
-            current_callback_url = "http://{}:{}/event".format(callback_host, self.socket.getsockname()[1])
-            logger.debug("Adding event subscription for service {}.{} with callback URL '{}'".format(service.device.friendly_name, service.name, current_callback_url))
+    def pend_subscription(self, statevar):
+        if not statevar.service in self._pending_subscriptions:
+            self._pending_subscriptions[statevar.service] = set()
+        self._pending_subscriptions[statevar.service].add(statevar)
+        logger.debug("Pending event subscription for statevar {}.{}.{}".format(statevar.service.device.friendly_name, statevar.service.name, statevar.name))
+        
+    def _subscribe(self, service, statevars=None):
+        # find out apropriate hostname or ip address for upnp device
+        deviceLocation = tuple(urlparse(service.device.location).netloc.split(":"))
+        #sq = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sq = socket.create_connection(deviceLocation)
+        callback_host = sq.getsockname()[0]
+        sq.shutdown(socket.SHUT_RDWR)
+        sq.close()
+        current_callback_url = "http://{}:{}/event".format(callback_host, self.socket.getsockname()[1])
+        logger.debug("Adding event subscription for service {}.{} with callback URL '{}'".format(service.device.friendly_name, service.name, current_callback_url))
+        
+        #TODO: Add statevars
+        sid, timeout = service.subscribe(current_callback_url, EVENT_SUBSCRIPTION_TIMEOUT)
+        self.active_subscriptions[sid] = { "service": service, "latest_seq": -1, "sid": sid }
+        logger.info("Added event subscription with id '{}' for service {}.{}".format(sid, service.device.friendly_name, service.name))
+        self._schedule_renewal(sid, timeout)
             
-            sid, timeout = service.subscribe(current_callback_url)
-            self.active_subscriptions[sid] = { "service": service, "latest_seq": -1, "sid": sid }
-            logger.info("Added event subscription with id '{}' for service {}.{}".format(sid, service.device.friendly_name, service.name))
-            #TODO: scheduler for renew subscription before timeout
-        else:
-            self.pending_subscriptions.add(service)
-            logger.debug("Pending event subscription for service {}.{}".format(service.device.friendly_name, service.name))
+    def _renew_subscription(self, sid):
+        service = self.active_subscriptions[sid]["service"]
+        timeout = service.renew_subscription(sid, EVENT_SUBSCRIPTION_TIMEOUT)
+        logger.info("Renewed event subscription '{}'".format(sid))
+        self._schedule_renewal(sid, timeout)
+        
+    def _schedule_renewal(self, sid, timeout):
+        if not timeout:
+            logger.debug("No renewal of event subscription '{}' required (no timeout value set)".format(sid))
+            return
+        # reduce timeout by 10 seconds (limitted to minimal the half timeout) to be sure the renewal is in time
+        timeout = max(timeout-10, int(timeout/2))
+        next = datetime.datetime.now(self._sh.tzinfo()) + datetime.timedelta(seconds=timeout)
+        self._sh.scheduler.add("UPnP_event_renewal_{})".format(sid), self._renew_subscription, value=sid, next=next)
     
     def connect(self):
         try:
             logger.debug("Binding CallbackServer")
             super().connect()
             logger.info("CallbackServer listening on '{}'".format(self._callback_url))
-            for service in self.pending_subscriptions:
-                self.add_subscription(service)
+            for service, statevars in self._pending_subscriptions.items():
+                self._subscribe(service, statevars)
         except Exception as e:
             logger.error(e)
-    
+
+    def close(self):
+        # cancel all active subscriptions
+        for sid, subscription in self.active_subscriptions.items():
+            subscription["service"].cancel_subscription(sid)
+        super().close()
+        
     def handle_connection(self):
         # Notify message sample:
         """    
@@ -261,7 +292,7 @@ CONTENT-LENGTH: bytes in body
                 logger.info("Ignored obsolete event notification for {}.{} with SEQ '{}' (latest SEQ was '{}')", service.device.friendly_name, service.name, seq, latest_seq)
                 return
             
-            source = "Event by {}.{}".format(service.device.friendly_name, service.name)
+            source = "Event notification by {}.{}".format(service.device.friendly_name, service.name)
             statevarnames = ???
             for statevarname in statevarnames:
                 statevar = service.statevars[statevarname]
@@ -282,6 +313,4 @@ If the plugin is run standalone e.g. for test purposes the follwing code will be
 """
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG, format='%(relativeCreated)6d %(threadName)s %(message)s')
-    # todo
-    # change PluginClassName appropriately
-    PluginClassName(None).run()
+    UPnP(None).run()
