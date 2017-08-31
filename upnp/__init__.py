@@ -89,9 +89,9 @@ class UPnP(SmartPlugin):
             if self.has_iattr(item.conf, 'upnp_statevar'):
                 device = upnpclient.Device(self.get_iattr_value(item.conf, 'upnp_device'))
                 service = device[self.get_iattr_value(item.conf, 'upnp_service')]
-                statevarname = self.get_iattr_value(item.conf, 'upnp_statevar')
+                statevar = service.statevars[self.get_iattr_value(item.conf, 'upnp_statevar')]
 
-                self.argitems[(service,statevarname)] = item
+                self.argitems[statevar] = item
                 
                 if self._subscribe_events:
                     self.callbackserver.add_subscription(service)
@@ -136,9 +136,9 @@ class UPnP(SmartPlugin):
                 action = server.find_action(actionname)
                 arguments = eval(self.get_iattr_value(item.conf, 'upnp_arguments')) if self.has_iattr(item.conf, 'upnp_arguments') else {}
                 
-                for (argname, statevar) in action.argsdef_in:
-                    if statevar['name'] in self.argitems:
-                        arguments[argname] = self.argitems[statevar['name']]()
+                for argname, statevar in action.argsdef_in.items():
+                    if statevar in self.argitems:
+                        arguments[argname] = self.argitems[statevar]()
                 #for argname, argval in arguments.items():
                 #    logger.info("arg: {} = {}".format(argname, argval))
                 
@@ -147,14 +147,13 @@ class UPnP(SmartPlugin):
                 resp = action(**arguments)
                 logger.debug("UPnP response: {}".format(resp))
                 for outargname, val in resp.items():
-                    statevarname = dict(action.argsdef_out)[outargname]['name']
-                    #logger.debug(statevarname)
+                    statevar = action.argsdef_out[outargname]
                     new_source = "Action {}.{}.{}".format(server.friendly_name, service.name, iattr_action)
-                    self.set_item_by_statevar(service, statevarname, value, new_source)
+                    self.set_item_by_statevar(statevar, value, new_source)
 
-    def set_item_by_statevar(self, service, statevarname, value, source):
-        if self.argitems[(service, statevarname)] != None:
-            self.argitems[(service, statevarname)](value, 'UPnP', source)
+    def set_item_by_statevar(self, statevar, value, source):
+        if statevar in self.argitems:
+            self.argitems[statevar](value, 'UPnP', source)
 
 
 class CallbackServer(lib.connection.Server):
@@ -254,7 +253,6 @@ CONTENT-LENGTH: bytes in body
             """
             sid = ???
             seq = ???
-            statevarname = ???
             value = ???
             subscription = active_subscriptions[sid]
             latest_seq = subscription["latest_seq"]
@@ -264,9 +262,12 @@ CONTENT-LENGTH: bytes in body
                 return
             
             source = "Event by {}.{}".format(service.device.friendly_name, service.name)
-            self._set_item_by_statevar_callback(service, statevarname, value, source)
+            statevarnames = ???
+            for statevarname in statevarnames:
+                statevar = service.statevars[statevarname]
+                self._set_item_by_statevar_callback(statevar, value, source)
             """
-            logger.debug("Notify Header:\n{}".format(contentbytes))
+            logger.debug("Notify Content:\n{}".format(contentbytes))
             
             self.send(b"HTTP/1.1 200 OK\r\n\r\n", close=True)
             
