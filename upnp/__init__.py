@@ -5,9 +5,6 @@
 #########################################################################
 #  This file is part of SmartHomeNG.   
 #
-#  Sample plugin for new plugins to run with SmartHomeNG version 1.1
-#  upwards.
-#
 #  SmartHomeNG is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
@@ -30,6 +27,8 @@ import upnpclient
 import lib.connection
 from lib.model.smartplugin import SmartPlugin
 
+logger = logging.getLogger(__name__)
+
 class UPnP(SmartPlugin):
     """
     Main class of the Plugin. Does all plugin specific stuff and provides
@@ -49,7 +48,6 @@ class UPnP(SmartPlugin):
         """
         
         self._sh = sh
-        self.logger = logging.getLogger(__name__)
         
         self._subscribe_events = self.to_bool(subscribe_events)
         if self._subscribe_events:
@@ -57,14 +55,13 @@ class UPnP(SmartPlugin):
                 port = int(event_callback_port)
             else:
                 port = 0
-                self.logger.error("Invalid value '{}' configured for attribute event_callback_port in plugin.conf, using '{}' instead".format(event_callback_port, port if port != None else "random"))
+                logger.error("Invalid value '{}' configured for attribute event_callback_port in plugin.conf, using '{}' instead".format(event_callback_port, port if port != None else "random"))
                 
-            self.callbackserver = CallbackServer(sh, self.logger, event_callback_ip, port)
+            self.callbackserver = CallbackServer(sh, self.set_item_by_statevar, event_callback_ip, port)
        
     def run(self):
         if self._subscribe_events:
             self.callbackserver.connect()
-            #self.actual_port = self.callbackserver.socket.getsockname()[1];
         self.alive = True
 
     def stop(self):
@@ -88,18 +85,17 @@ class UPnP(SmartPlugin):
                         can be sent to the knx with a knx write function within the knx plugin.
 
         """
-        #if self.has_iattr(item.conf, 'upnp_action') and isinstance(self.get_iattr_value(item.conf, 'upnp_action'), list) :
-        #    self.logger.debug("item: {}, type: {}".format(item, type(self.get_iattr_value(item.conf, 'upnp_action')[0])))
-        if self.has_iattr(item.conf, 'upnp_statevar'):
-            statevarname = self.get_iattr_value(item.conf, 'upnp_statevar')
-            self.argitems[statevarname] = item
-
-        if self.has_iattr(item.conf, 'upnp_device'):
-            #self.logger.debug("parse item: {0}".format(item))
-            if self._subscribe_events and self.has_iattr(item.conf, 'upnp_service') and self.has_iattr(item.conf, 'upnp_statevar'):
+        if self.has_iattr(item.conf, 'upnp_device') and self.has_iattr(item.conf, 'upnp_service'):
+            if self.has_iattr(item.conf, 'upnp_statevar'):
                 device = upnpclient.Device(self.get_iattr_value(item.conf, 'upnp_device'))
                 service = device[self.get_iattr_value(item.conf, 'upnp_service')]
-                self.callbackserver.add_subscription((device,service))
+                statevarname = self.get_iattr_value(item.conf, 'upnp_statevar')
+
+                self.argitems[(service,statevarname)] = item
+                
+                if self._subscribe_events:
+                    self.callbackserver.add_subscription(service)
+                
             return self.update_item
 
     def parse_logic(self, logic):
@@ -119,7 +115,7 @@ class UPnP(SmartPlugin):
         :param source: if given it represents the source
         :param dest: if given it represents the dest
         """
-        self.logger.debug("item: {}, caller: {}, source: {}, dest: {}".format(item, caller, source, dest))
+        logger.debug("item: {}, caller: {}, source: {}, dest: {}".format(item, caller, source, dest))
 
         if caller != 'UPnP' and self.has_iattr(item.conf, 'upnp_action'):
             value = item()
@@ -144,18 +140,21 @@ class UPnP(SmartPlugin):
                     if statevar['name'] in self.argitems:
                         arguments[argname] = self.argitems[statevar['name']]()
                 #for argname, argval in arguments.items():
-                #    self.logger.info("arg: {} = {}".format(argname, argval))
+                #    logger.info("arg: {} = {}".format(argname, argval))
                 
                 #call UPnP action                
-                self.logger.info("Calling {}({})".format(actionname, arguments))
+                logger.info("Calling {}({})".format(actionname, arguments))
                 resp = action(**arguments)
-                self.logger.debug("UPnP response: {}".format(resp))
+                logger.debug("UPnP response: {}".format(resp))
                 for outargname, val in resp.items():
                     statevarname = dict(action.argsdef_out)[outargname]['name']
-                    #self.logger.debug(statevarname)
-                    if self.argitems[statevarname] != None:
-                        src = "{}.{}".format(server.friendly_name, iattr_action)
-                        self.argitems[statevarname](val, 'UPnP', src, 'Unicast')
+                    #logger.debug(statevarname)
+                    new_source = "Action {}.{}.{}".format(server.friendly_name, service.name, iattr_action)
+                    self.set_item_by_statevar(service, statevarname, value, new_source)
+
+    def set_item_by_statevar(self, service, statevarname, value, source):
+        if self.argitems[(service, statevarname)] != None:
+            self.argitems[(service, statevarname)](value, 'UPnP', source)
 
 
 class CallbackServer(lib.connection.Server):
@@ -165,40 +164,40 @@ class CallbackServer(lib.connection.Server):
     active_subscriptions = {}
     pending_subscriptions = set()
     
-    def __init__(self, smarthome, logger, ip, port):
+    def __init__(self, smarthome, set_item_by_statevar_callback, ip, port):
         lib.connection.Server.__init__(self, ip, port)
-        self.logger = logger #logging.getLogger(__name__)
+        self._set_item_by_statevar_callback = set_item_by_statevar_callback
         self._sh = smarthome
         
     def add_subscription(self, service):
         if self.connected:            
             # find out apropriate hostname or ip address for upnp device
-            deviceLocation = tuple(urlparse(service[0].location).netloc.split(":"))
+            deviceLocation = tuple(urlparse(service.device.location).netloc.split(":"))
             #sq = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sq = socket.create_connection(deviceLocation)
             callback_host = sq.getsockname()[0]
             sq.shutdown(socket.SHUT_RDWR)
             sq.close()
             current_callback_url = "http://{}:{}/event".format(callback_host, self.socket.getsockname()[1])
-            self.logger.debug("Adding event subscription for service '{}' with callback URL '{}'".format(service, current_callback_url))
+            logger.debug("Adding event subscription for service {}.{} with callback URL '{}'".format(service.device.friendly_name, service.name, current_callback_url))
             
-            sid, timeout = service[1].subscribe(current_callback_url)
-            self.active_subscriptions[sid] = service[1]
-            self.logger.info("Added event subscription with id '{}' for service '{}'".format(sid, service))
+            sid, timeout = service.subscribe(current_callback_url)
+            self.active_subscriptions[sid] = { "service": service, "latest_seq": -1, "sid": sid }
+            logger.info("Added event subscription with id '{}' for service {}.{}".format(sid, service.device.friendly_name, service.name))
             #TODO: scheduler for renew subscription before timeout
         else:
             self.pending_subscriptions.add(service)
-            self.logger.debug("Pending event subscription for service '{}'".format(service))
+            logger.debug("Pending event subscription for service {}.{}".format(service.device.friendly_name, service.name))
     
     def connect(self):
         try:
-            self.logger.debug("Binding CallbackServer")
+            logger.debug("Binding CallbackServer")
             super().connect()
-            self.logger.info("CallbackServer listening on '{}'".format(self._callback_url))
+            logger.info("CallbackServer listening on '{}'".format(self._callback_url))
             for service in self.pending_subscriptions:
                 self.add_subscription(service)
         except Exception as e:
-            self.logger.error(e)
+            logger.error(e)
     
     def handle_connection(self):
         # Notify message sample:
@@ -238,12 +237,12 @@ CONTENT-LENGTH: bytes in body
         
         headerstring = headerbytes.decode()
         if not headerstring.startswith('NOTIFY '):
-            self.logger.warning("Bad request from {}".format(remoteaddr))
+            logger.warning("Bad request from {}".format(remoteaddr))
             self.send(b"HTTP/1.1 400 Bad Request\r\n\r\n", close=True)
             return
         else:
             #TODO: Parse UPnP NOTIFY header
-            self.logger.debug("Notify Header:\n{}".format(headerstring))
+            logger.debug("Notify Header:\n{}".format(headerstring))
 
             while True:
                 buffer = sock.recv(1024)
@@ -252,7 +251,22 @@ CONTENT-LENGTH: bytes in body
                 contentbytes.extend(buffer)
             
             #TODO: parse UPnP XML in contentbytes
-            self.logger.debug("Notify Header:\n{}".format(contentbytes))
+            """
+            sid = ???
+            seq = ???
+            statevarname = ???
+            value = ???
+            subscription = active_subscriptions[sid]
+            latest_seq = subscription["latest_seq"]
+            service = subscription["service"]
+            if seq <= last_seq:
+                logger.info("Ignored obsolete event notification for {}.{} with SEQ '{}' (latest SEQ was '{}')", service.device.friendly_name, service.name, seq, latest_seq)
+                return
+            
+            source = "Event by {}.{}".format(service.device.friendly_name, service.name)
+            self._set_item_by_statevar_callback(service, statevarname, value, source)
+            """
+            logger.debug("Notify Header:\n{}".format(contentbytes))
             
             self.send(b"HTTP/1.1 200 OK\r\n\r\n", close=True)
             
