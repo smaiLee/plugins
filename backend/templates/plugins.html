@@ -21,7 +21,7 @@
             </thead>
             <tbody>
                 {% for p in plugins  %}
-                <tr id="{{ loop.index }}_click" style="cursor: pointer;">
+                <tr class="plugins_additional_toggle" style="cursor: pointer;">
                     <td width="30px">{{ loop.index }}</td>
                     <td width="30px">{% if p.smartplugin %}SmartPlugin{%else%}Classic{%endif%}
                     <td width="200px">{{ p.classpath }}</td>
@@ -38,7 +38,7 @@
                         <td>-</td>
                     {%endif%}
                 </tr>
-                <tr id="{{ loop.index }}_additional" style="display: none; cursor: pointer;">
+                <tr class="plugins_additional" style="display: none; cursor: pointer;">
                     <td colspan="7">
                         <div class="panel panel-default">
                             <div class="panel-heading">{{ _('Plugin spezifische Attribute') }}:</div>
@@ -56,17 +56,18 @@
                         </div>
                     </td>
                 </tr>
-                <script>
-                $(document).on('click', 'tr', function(event){
-                    if (event.target.closest('tr').id == '{{ loop.index }}_click') {
-                        $('#'+event.target.closest('tr').id.replace('click', 'additional')).toggle();
-                    } else if (event.target.closest('tr').id == '{{ loop.index }}_additional') {
-                        $('#'+event.target.closest('tr').id).toggle();
-                    }
-                });
-                </script>
                 {% endfor %}
             </tbody>
         </table>
+        <script>
+            $('tr.plugins_additional_toggle').on('click', function(event){
+                $(this).siblings('tr.plugins_additional').toggle();
+            });
+            $('tr.plugins_additional').on('click', function(event){
+                $(this).toggle();
+            });
+        </script>
     </div>
 {% endblock %}
+
+
