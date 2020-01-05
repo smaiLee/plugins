@@ -147,6 +147,11 @@ class Database(SmartPlugin):
     def update_item(self, item, caller=None, source=None, dest=None):
         acl = 'rw' if not self.has_iattr(item.conf, 'database_acl') else self.get_iattr_value(item.conf, 'database_acl')
         if acl is 'rw':
+            if self.has_iattr(item.conf, 'database_threshold'):
+                threshold = item.cast(self.get_iattr_value(item.conf, 'database_threshold'))
+                if abs(item() - item.cast(newval)) < threshold:
+                    self.logger.debug('Value not added to database due to configured threshold of {0} (old value: {1}, new value: {2})'.format(threshold, item(), newval))
+                    return
             start = self._timestamp(item.prev_change())
             end = self._timestamp(item.last_change())
             last = None if len(self._buffer[item]) == 0 or self._buffer[item][-1][1] is not None else \
