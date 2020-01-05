@@ -59,6 +59,12 @@ item_attributes:
             de: "Wenn auf 'yes' gesetzt, werden die Werte des Items in die Datenbank geschrieben. Wenn auf 'init' gesetzt, wird zusätzlich beim Start von SmartHomeNG der Wert in die Datenbank geschrieben."
             en: "This attribute enables the database logging when set (just use value 'yes'). If value 'init' is used, an item will be initalized from the database after SmartHomeNG is restarted."
 
+    database_threshold:
+        type: num
+        valid_min: 0
+        description:
+            de: "Minimale Wertänderung, damit ein Datenbankeintrag erstellt wird (kleinere Änderungen werden ignoriert)."
+            en: "Minimal change for inserting an entry into database (lower changes are ignored)."
 
 item_structs: NONE
   # Definition of item-structure templates for this plugin
